@@ -333,3 +333,34 @@ def test_a_fully_cached_prefixed_run_needs_no_server(tmp_path, recorded, monkeyp
     path.write_text(json.dumps({"k": key, "model": LOCAL_ID, "resp": "C"}) + "\n")
     assert _lane.Cache(path, _lane.key_for(LOCAL_ID), LOCAL_ID).complete("p") == "C"
     assert recorded == []
+
+
+def _load_deliberation_channel():
+    """experiments/medqa/deliberation_channel.py calls the OpenAI client itself, not backend.complete."""
+    path = Path(__file__).resolve().parents[1] / "experiments" / "medqa" / "deliberation_channel.py"
+    spec = importlib.util.spec_from_file_location("medqa_deliberation_channel", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("model, sent", [(LOCAL_ID, SERVED_ID),
+                                         ("Qwen/Qwen2.5-VL-72B-Instruct", "Qwen/Qwen2.5-VL-72B-Instruct")])
+def test_the_direct_client_call_in_deliberation_channel_sends_the_served_id(monkeypatch, model, sent):
+    """The channel arm builds its own request; a prefixed id must reach the server without its prefix."""
+    channel = _load_deliberation_channel()
+    monkeypatch.setattr(_lane, "LOCAL_BASE_URL", LOCAL)
+    sent_kwargs = []
+
+    class _Completions:
+        def create(self, **kwargs):
+            sent_kwargs.append(kwargs)
+            message = types.SimpleNamespace(content="B", reasoning_content=None, model_extra={})
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message, finish_reason="stop")],
+                                         usage=types.SimpleNamespace(completion_tokens=1))
+
+    backend = types.SimpleNamespace(_client=types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions())))
+    monkeypatch.setattr(channel._lane, "backend_for", lambda m, key, client=None: backend)
+    result = channel._call(model, "not-needed", "prompt", "none")
+    assert result["content"] == "B"
+    assert [k["model"] for k in sent_kwargs] == [sent]
